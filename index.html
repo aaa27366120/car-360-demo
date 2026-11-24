@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>360° 互動賞車</title>
+<style>
+  /* ===== 基本版面 ===== */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    background: #f2f3f5; color: #222;
+    font-family: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+  }
+  h1 { margin: 24px 16px 4px; font-size: 1.6rem; letter-spacing: 0.05em; }
+  .hint { margin: 0 16px 16px; color: #666; }
+
+  /* ===== 車輛展示區 ===== */
+  .stage {
+    position: relative; width: min(96vw, 1100px);
+    aspect-ratio: 16 / 9;            /* 照片比例（你的照片是 16:9）*/
+    background: #fff; border-radius: 12px; overflow: hidden;
+    cursor: grab; user-select: none; -webkit-user-select: none;
+    touch-action: pan-y;             /* 左右滑動轉車，上下滑動仍可捲動頁面 */
+  }
+  .stage.dragging { cursor: grabbing; }
+  .stage img { width: 100%; height: 100%; object-fit: contain; display: block;
+               pointer-events: none; -webkit-user-drag: none; }
+
+  /* ===== 載入進度與錯誤訊息 ===== */
+  .overlay { position: absolute; inset: 0; display: flex; flex-direction: column;
+             align-items: center; justify-content: center; background: #fff;
+             text-align: center; padding: 16px; }
+  .bar { width: min(60%, 320px); height: 8px; background: #e3e5e8; border-radius: 4px; margin-top: 12px; overflow: hidden; }
+  .bar span { display: block; height: 100%; width: 0; background: #1a73e8; transition: width .15s; }
+  .error { color: #c62828; line-height: 1.8; }
+  .error code { background: #fdecea; padding: 1px 6px; border-radius: 4px; }
+  .hidden { display: none !important; }
+
+  /* ===== 控制按鈕 ===== */
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin: 16px 8px 32px; }
+  button {
+    padding: 10px 22px; font-size: 1rem; cursor: pointer;
+    border: 1px solid #1a73e8; background: #fff; color: #1a73e8; border-radius: 999px;
+    touch-action: manipulation; user-select: none; -webkit-user-select: none;
+  }
+  button:hover, button.active { background: #1a73e8; color: #fff; }
+</style>
+</head>
+<body>
+
+  <h1>360° 互動賞車</h1>
+  <p class="hint">左右拖曳，旋轉觀看車輛</p>
+
+  <div class="stage" id="stage">
+    <img id="car" alt="車輛照片" class="hidden">
+    <div class="overlay" id="loading">
+      <div id="loadingText">照片載入中… 0 / 48</div>
+      <div class="bar"><span id="bar"></span></div>
+    </div>
+    <div class="overlay error hidden" id="error"></div>
+  </div>
+
+  <div class="controls hidden" id="controls">
+    <button id="leftBtn">◀ 左轉</button>
+    <button id="autoBtn">自動旋轉</button>
+    <button id="rightBtn">右轉 ▶</button>
+    <button id="resetBtn">回到初始角度</button>
+  </div>
+
+<script>
+  // ===== 設定區：換車時通常只需要改這裡 =====
+  const TOTAL_FRAMES = 48;       // 照片總張數
+  const FOLDER = "images/";      // 照片資料夾
+  const EXTENSION = ".jpg";      // 副檔名（GitHub 區分大小寫）
+  const START_FRAME = 0;         // 初始角度（0 = 01.jpg）
+  const PIXELS_PER_FRAME = 10;   // 拖曳多少像素換一張，越小轉越快
+  const FRICTION = 3;            // 慣性摩擦力，越大停得越快
+  const HOLD_SPEED = 12;         // 按住左右按鈕時，每秒轉幾張
+  const AUTO_SPEED = 6;          // 自動旋轉速度（每秒幾張）
+  const REVERSE = false;         // 轉的方向相反時改成 true
+
+  // ===== 取得元素 =====
+  const $ = (id) => document.getElementById(id);
+  const stage = $("stage"), car = $("car"), loading = $("loading"),
+        loadingText = $("loadingText"), bar = $("bar"), errorBox = $("error"),
+        controls = $("controls"), leftBtn = $("leftBtn"), rightBtn = $("rightBtn"),
+        autoBtn = $("autoBtn"), resetBtn = $("resetBtn");
+  const DIR = REVERSE ? -1 : 1;
+
+  // ===== 產生照片網址：images/01.jpg ~ images/24.jpg =====
+  const urls = [];
+  for (let i = 1; i <= TOTAL_FRAMES; i++) {
+    urls.push(FOLDER + String(i).padStart(2, "0") + EXTENSION);
+  }
+
+  // ===== 預先載入所有照片 =====
+  let doneCount = 0;
+  const failed = [];
+  function onOneDone() {
+    doneCount++;
+    loadingText.textContent = "照片載入中… " + doneCount + " / " + TOTAL_FRAMES;
+    bar.style.width = (doneCount / TOTAL_FRAMES * 100) + "%";
+    if (doneCount === TOTAL_FRAMES) finishLoading();
+  }
+  urls.forEach(function (url) {
+    const img = new Image();
+    img.onload = onOneDone;
+    img.onerror = function () { failed.push(url); onOneDone(); };
+    img.src = url;
+  });
+
+  function finishLoading() {
+    loading.classList.add("hidden");
+    if (failed.length > 0) {                      // 有照片找不到：顯示清楚錯誤
+      failed.sort();
+      errorBox.innerHTML = "<strong>有 " + failed.length + " 張照片載入失敗</strong><br>" +
+        "請確認 images 資料夾內有這些檔案（檔名需完全一致，包含大小寫）：<br>" +
+        failed.map(function (u) { return "<code>" + u + "</code>"; }).join(" ");
+      errorBox.classList.remove("hidden");
+      return;
+    }
+    car.classList.remove("hidden");
+    controls.classList.remove("hidden");
+    ready = true;
+    // 使用者若設定「減少動態效果」，就不自動旋轉
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) setAuto(true);
+    requestAnimationFrame(tick);
+  }
+
+  // ===== 狀態 =====
+  let ready = false;
+  let pos = START_FRAME;      // 目前位置（可以是小數，顯示時才四捨五入）
+  let velocity = 0;           // 慣性速度（張/秒）
+  let holdDir = 0;            // 按住按鈕：1 = 左轉、-1 = 右轉、0 = 沒按
+  let autoOn = false;         // 是否自動旋轉
+  let dragging = false;
+  let shownFrame = -1;
+
+  function render() {
+    const n = ((Math.round(pos) % TOTAL_FRAMES) + TOTAL_FRAMES) % TOTAL_FRAMES;
+    if (n !== shownFrame) { shownFrame = n; car.src = urls[n]; }   // 張數變了才換圖
+  }
+
+  // ===== 主迴圈：每個畫面更新一次，處理慣性、按鈕、自動旋轉 =====
+  let lastT = 0;
+  function tick(t) {
+    const dt = Math.min((t - lastT) / 1000, 0.05);   // 秒；上限避免切分頁回來暴衝
+    lastT = t;
+    if (!dragging) {
+      if (holdDir !== 0) {
+        pos += holdDir * DIR * HOLD_SPEED * dt;
+        velocity = 0;
+      } else if (Math.abs(velocity) > 0.3) {
+        pos += velocity * dt;
+        velocity *= Math.exp(-FRICTION * dt);        // 慢慢減速
+      } else if (autoOn) {
+        pos += DIR * AUTO_SPEED * dt;
+        velocity = 0;
+      } else {
+        velocity = 0;
+      }
+    }
+    render();
+    requestAnimationFrame(tick);
+  }
+
+  function setAuto(on) {
+    autoOn = on;
+    autoBtn.classList.toggle("active", on);
+    autoBtn.textContent = on ? "停止旋轉" : "自動旋轉";
+  }
+
+  // ===== 拖曳旋轉（滑鼠、手指通用）=====
+  let startX = 0, startPos = 0, samples = [];
+  stage.addEventListener("pointerdown", function (e) {
+    if (!ready) return;
+    dragging = true; velocity = 0; setAuto(false);
+    startX = e.clientX; startPos = pos;
+    samples = [{ t: performance.now(), p: pos }];
+    stage.classList.add("dragging");
+    stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener("pointermove", function (e) {
+    if (!dragging) return;
+    pos = startPos - DIR * (e.clientX - startX) / PIXELS_PER_FRAME;
+    const now = performance.now();
+    samples.push({ t: now, p: pos });
+    while (samples.length > 2 && now - samples[0].t > 100) samples.shift();  // 只保留最近 0.1 秒
+  });
+  function stopDrag() {
+    if (!dragging) return;
+    dragging = false;
+    stage.classList.remove("dragging");
+    // 用最後 0.1 秒的移動量算出放手時的速度，產生慣性
+    const a = samples[0], b = samples[samples.length - 1];
+    const dt = (b.t - a.t) / 1000;
+    velocity = (dt > 0.01 && performance.now() - b.t < 80) ? (b.p - a.p) / dt : 0;
+    velocity = Math.max(-40, Math.min(40, velocity));   // 限制最高速度
+  }
+  stage.addEventListener("pointerup", stopDrag);
+  stage.addEventListener("pointercancel", stopDrag);
+
+  // ===== 左右轉按鈕（按住連續轉，放開停止）=====
+  function bindHold(btn, dir) {
+    btn.addEventListener("pointerdown", function (e) {
+      e.preventDefault();
+      setAuto(false); velocity = 0; holdDir = dir;
+      pos += dir * DIR * 0.5;              // 輕點也至少轉半格
+    });
+    ["pointerup", "pointerleave", "pointercancel"].forEach(function (ev) {
+      btn.addEventListener(ev, function () { holdDir = 0; });
+    });
+  }
+  bindHold(leftBtn, 1);
+  bindHold(rightBtn, -1);
+
+  // ===== 鍵盤左右鍵（電腦用）=====
+  window.addEventListener("keydown", function (e) {
+    if (!ready) return;
+    if (e.key === "ArrowLeft")  { setAuto(false); holdDir = 1; }
+    if (e.key === "ArrowRight") { setAuto(false); holdDir = -1; }
+  });
+  window.addEventListener("keyup", function (e) {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") holdDir = 0;
+  });
+
+  // ===== 自動旋轉開關、回到初始角度 =====
+  autoBtn.addEventListener("click", function () { velocity = 0; setAuto(!autoOn); });
+  resetBtn.addEventListener("click", function () { velocity = 0; setAuto(false); pos = START_FRAME; });
+</script>
+</body>
+</html>
